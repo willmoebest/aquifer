@@ -24,8 +24,7 @@ Aquifer is a powerful and flexible database synchronization tool designed to syn
 1. Clone the repository:
 
     ```sh
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone https://github.com/willmoebest/aquifer.git
     ```
 
 2. Install required Python packages:
