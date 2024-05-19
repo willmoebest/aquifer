@@ -12,6 +12,8 @@ Aquifer is a database synchronization tool designed to synchronize database obje
 - Log changes and provide rollback functionality.
 - Command-line interface for easy usage.
 
+- Tested so far on MySQL 8.
+
 ## Requirements
 
 - Python 3.6+
