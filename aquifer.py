@@ -1,3 +1,9 @@
+"""
+Author: Will Moebest
+Date: 5/19/2024
+Description: Aquifer - A comprehensive database synchronization tool supporting MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle.
+             This script was developed with the assistance of GPT-4 by OpenAI.
+"""
 import json
 import argparse
 import hashlib
@@ -5,10 +11,14 @@ import logging
 import mysql.connector
 import psycopg2
 import pymongo
+import pyodbc
+import cx_Oracle
 from neo4j import GraphDatabase
 from abc import ABC, abstractmethod
 from mysql.connector import Error as MySQLError
 from psycopg2 import Error as PGError
+from pyodbc import Error as ODBCError
+from cx_Oracle import Error as OracleError
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -107,8 +117,6 @@ class MySQLSync(DatabaseSync):
 
             # Synchronization logic
             self.cursor.execute(f"DESCRIBE {table}")
-
-
             source_schema = self.cursor.fetchall()
             source_columns = [(col[0], col[1]) for col in source_schema]
 
@@ -207,7 +215,7 @@ class MySQLSync(DatabaseSync):
                 return
 
             if target_exists:
-                target_definition = self.get_procedure_definition(target_cursor, procedure_name)
+                target_definition = self.get_procedure_definition(procedure_name)
                 original_state = target_definition
 
                 if source_definition != target_definition:
@@ -306,9 +314,7 @@ class MySQLSync(DatabaseSync):
             else:
                 logging.warning(f"No rollback action found for procedure {procedure_name}.")
         except MySQLError as e:
-            logging.error(f"Error rolling back procedure
-
- {procedure_name}: {e}")
+            logging.error(f"Error rolling back procedure {procedure_name}: {e}")
 
 class PostgreSQLSync(DatabaseSync):
     def connect(self):
@@ -512,9 +518,7 @@ class PostgreSQLSync(DatabaseSync):
                     self.cursor.execute(original_state)
                     logging.info(f"Rolled back table {table_name} to its original state using: {original_state}")
             else:
-                logging.warning(f"No rollback action
-
- found for table {table_name}.")
+                logging.warning(f"No rollback action found for table {table_name}.")
         except PGError as e:
             logging.error(f"Error rolling back table {table_name}: {e}")
 
@@ -685,6 +689,498 @@ class Neo4jSync(DatabaseSync):
         # Implement Neo4j-specific logic for rolling back procedures (if applicable)
         pass
 
+class SQLServerSync(DatabaseSync):
+    def connect(self):
+        try:
+            conn_str = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.config['host']};"
+                f"DATABASE={self.config['database']};"
+                f"UID={self.config['user']};"
+                f"PWD={self.config['password']}"
+            )
+            self.conn = pyodbc.connect(conn_str)
+            self.cursor = self.conn.cursor()
+        except ODBCError as e:
+            logging.error(f"Error connecting to SQL Server: {e}")
+            raise
+    
+    def close(self):
+        self.cursor.close()
+        self.conn.close()
+    
+    def log_sync_action(self, object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action):
+        try:
+            self.cursor.execute("""
+                INSERT INTO sync_log (object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action))
+            self.conn.commit()
+        except ODBCError as e:
+            logging.error(f"Error logging sync action: {e}")
+    
+    def test_sql_statement(self, statement):
+        try:
+            self.cursor.execute("BEGIN TRANSACTION")
+            self.cursor.execute(statement)
+            self.cursor.execute("ROLLBACK TRANSACTION")
+            return True
+        except ODBCError as e:
+            logging.error(f"Invalid SQL statement: {statement}. Error: {e}")
+            self.cursor.execute("ROLLBACK TRANSACTION")
+            return False
+
+    def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
+        try:
+            # Retrieve original state from target
+            self.cursor.execute(f"SELECT OBJECT_DEFINITION (OBJECT_ID(N'{table}'))")
+            original_state = self.cursor.fetchone()
+            original_state = original_state[0] if original_state else None
+
+            # Synchronization logic
+            self.cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'{table}'")
+            source_schema = self.cursor.fetchall()
+            source_columns = [(col[0], col[1]) for col in source_schema]
+
+            self.cursor.execute(f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'{table}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists:
+                if create_on_target:
+                    logging.info(f"Table {table} doesn't exist on target. Creating...")
+                    create_table_statement = f"CREATE TABLE {table} ("
+                    for column, column_type in source_columns:
+                        create_table_statement += f"{column} {column_type}, "
+                    create_table_statement = create_table_statement[:-2] + ");"
+                    
+                    if self.test_sql_statement(create_table_statement):
+                        self.cursor.execute(create_table_statement)
+                        new_state = create_table_statement
+                        logging.info(f"Table {table} created successfully on target.")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                return
+
+            # If the table exists on the target
+            self.cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'{table}'")
+            target_schema = self.cursor.fetchall()
+            target_columns = {col[0]: col[1] for col in target_schema}
+
+            for column, column_type in source_columns:
+                if column not in target_columns:
+                    if alter_sync:
+                        statement = f"ALTER TABLE {table} ADD {column} {column_type};"
+                        logging.info(f"Applying ALTER statement: {statement}")
+                        
+                        if self.test_sql_statement(statement):
+                            self.cursor.execute(statement)
+                            new_state = statement
+                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
+                    else:
+                        logging.info(f"Table '{table}' has a new column '{column}'")
+                else:
+                    logging.info(f"Table '{table}' column '{column}' already exists.")
+        except ODBCError as e:
+            logging.error(f"Error synchronizing table {table}: {e}")
+
+    def synchronize_view(self, view_name, alter_sync, source_code_hash, create_on_target):
+        try:
+            source_definition = self.get_view_definition(view_name)
+            self.cursor.execute(f"SELECT OBJECT_DEFINITION (OBJECT_ID(N'{view_name}'))")
+            original_state = self.cursor.fetchone()
+            original_state = original_state[0] if original_state else None
+
+            self.cursor.execute(f"SELECT * FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_NAME = N'{view_name}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists and create_on_target:
+                logging.info(f"View {view_name} doesn't exist on target. Creating...")
+                
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"View {view_name} created successfully on target.")
+                    self.log_sync_action("view", view_name, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                return
+
+            if source_definition != original_state:
+                logging.info(f"Synchronizing view: {view_name}")
+                self.cursor.execute(f"DROP VIEW IF EXISTS {view_name}")
+                
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"View {view_name} synchronized successfully.")
+                    self.log_sync_action("view", view_name, "sync", source_code_hash, "source_to_target", original_state, new_state, "drop")
+            else:
+                logging.info(f"View {view_name} is already synchronized.")
+        except ODBCError as e:
+            logging.error(f"Error synchronizing view {view_name}: {e}")
+
+    def synchronize_procedure(self, procedure_name, alter_sync, source_code_hash, create_on_target):
+        try:
+            source_definition = self.get_procedure_definition(procedure_name)
+
+            self.cursor.execute(f"SELECT * FROM sys.procedures WHERE name = '{procedure_name}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists or create_on_target:
+                if not target_exists:
+                    logging.info(f"Procedure {procedure_name} doesn't exist on target. Creating...")
+                else:
+                    logging.info(f"Procedure {procedure_name} creation is not disabled. Creating...")
+
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"Procedure {procedure_name} created successfully on target.")
+                    self.log_sync_action("procedure", procedure_name, "create", source_code_hash, "source_to_target", None, new_state, "drop")
+                return
+
+            if target_exists:
+                target_definition = self.get_procedure_definition(procedure_name)
+                original_state = target_definition
+
+                if source_definition != target_definition:
+                    logging.info(f"Synchronizing procedure: {procedure_name}")
+                    self.cursor.execute(f"DROP PROCEDURE IF EXISTS {procedure_name}")
+                    
+                    if self.test_sql_statement(source_definition):
+                        self.cursor.execute(source_definition)
+                        new_state = source_definition
+                        logging.info(f"Procedure {procedure_name} synchronized successfully.")
+                        self.log_sync_action("procedure", procedure_name, "sync", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                else:
+                    logging.info(f"Procedure {procedure_name} is already synchronized.")
+        except ODBCError as e:
+            logging.error(f"Error synchronizing procedure {procedure_name}: {e}")
+
+    def synchronize_all_tables(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+            tables_to_sync = [table[0] for table in self.cursor.fetchall()]
+
+            for table in tables_to_sync:
+                self.synchronize_table(table, alter_sync, source_code_hash, create_on_target)
+        except ODBCError as e:
+            logging.error(f"Error synchronizing all tables: {e}")
+
+    def synchronize_all_views(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS")
+            views_to_sync = [view[0] for view in self.cursor.fetchall()]
+
+            for view in views_to_sync:
+                self.synchronize_view(view, alter_sync, source_code_hash, create_on_target)
+        except ODBCError as e:
+            logging.error(f"Error synchronizing all views: {e}")
+
+    def synchronize_all_procedures(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT name FROM sys.procedures")
+            procedures_to_sync = [proc[0] for proc in self.cursor.fetchall()]
+
+            for procedure in procedures_to_sync:
+                self.synchronize_procedure(procedure, alter_sync, source_code_hash, create_on_target)
+        except ODBCError as e:
+            logging.error(f"Error synchronizing all procedures: {e}")
+
+    def rollback_table(self, table_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='table' AND object_name=? ORDER BY timestamp DESC LIMIT 1", (table_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP TABLE IF EXISTS {table_name}")
+                logging.info(f"Dropped table {table_name} as part of rollback.")
+            elif action == 'alter' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back table {table_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for table {table_name}.")
+        except ODBCError as e:
+            logging.error(f"Error rolling back table {table_name}: {e}")
+
+    def rollback_view(self, view_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='view' AND object_name=? ORDER BY timestamp DESC LIMIT 1", (view_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP VIEW IF EXISTS {view_name}")
+                logging.info(f"Dropped view {view_name} as part of rollback.")
+            elif action == 'sync' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back view {view_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for view {view_name}.")
+        except ODBCError as e:
+            logging.error(f"Error rolling back view {view_name}: {e}")
+
+    def rollback_procedure(self, procedure_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='procedure' AND object_name=? ORDER BY timestamp DESC LIMIT 1", (procedure_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP PROCEDURE IF EXISTS {procedure_name}")
+                logging.info(f"Dropped procedure {procedure_name} as part of rollback.")
+            elif action == 'sync' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back procedure {procedure_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for procedure {procedure_name}.")
+        except ODBCError as e:
+            logging.error(f"Error rolling back procedure {procedure_name}: {e}")
+
+class OracleSync(DatabaseSync):
+    def connect(self):
+        try:
+            dsn_tns = cx_Oracle.makedsn(self.config['host'], self.config['port'], sid=self.config['sid'])
+            self.conn = cx_Oracle.connect(user=self.config['user'], password=self.config['password'], dsn=dsn_tns)
+            self.cursor = self.conn.cursor()
+        except OracleError as e:
+            logging.error(f"Error connecting to Oracle: {e}")
+            raise
+    
+    def close(self):
+        self.cursor.close()
+        self.conn.close()
+    
+    def log_sync_action(self, object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action):
+        try:
+            self.cursor.execute("""
+                INSERT INTO sync_log (object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action)
+                VALUES (:1, :2, :3, :4, :5, :6, :7, :8)
+            """, (object_type, object_name, action, source_code_hash, sync_direction, original_state, new_state, rollback_action))
+            self.conn.commit()
+        except OracleError as e:
+            logging.error(f"Error logging sync action: {e}")
+    
+    def test_sql_statement(self, statement):
+        try:
+            self.cursor.execute("BEGIN")
+            self.cursor.execute(statement)
+            self.cursor.execute("ROLLBACK")
+            return True
+        except OracleError as e:
+            logging.error(f"Invalid SQL statement: {statement}. Error: {e}")
+            self.cursor.execute("ROLLBACK")
+            return False
+
+    def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
+        try:
+            # Retrieve original state from target
+            self.cursor.execute(f"SELECT dbms_metadata.get_ddl('TABLE', '{table.upper()}') FROM dual")
+            original_state = self.cursor.fetchone()
+            original_state = original_state[0] if original_state else None
+
+            # Synchronization logic
+            self.cursor.execute(f"SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '{table.upper()}'")
+            source_schema = self.cursor.fetchall()
+            source_columns = [(col[0], col[1]) for col in source_schema]
+
+            self.cursor.execute(f"SELECT table_name FROM user_tables WHERE table_name = '{table.upper()}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists:
+                if create_on_target:
+                    logging.info(f"Table {table} doesn't exist on target. Creating...")
+                    create_table_statement = f"CREATE TABLE {table} ("
+                    for column, column_type in source_columns:
+                        create_table_statement += f"{column} {column_type}, "
+                    create_table_statement = create_table_statement[:-2] + ");"
+                    
+                    if self.test_sql_statement(create_table_statement):
+                        self.cursor.execute(create_table_statement)
+                        new_state = create_table_statement
+                        logging.info(f"Table {table} created successfully on target.")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                return
+
+            # If the table exists on the target
+            self.cursor.execute(f"SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '{table.upper()}'")
+            target_schema = self.cursor.fetchall()
+            target_columns = {col[0]: col[1] for col in target_schema}
+
+            for column, column_type in source_columns:
+                if column not in target_columns:
+                    if alter_sync:
+                        statement = f"ALTER TABLE {table} ADD ({column} {column_type})"
+                        logging.info(f"Applying ALTER statement: {statement}")
+                        
+                        if self.test_sql_statement(statement):
+                            self.cursor.execute(statement)
+                            new_state = statement
+                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
+                    else:
+                        logging.info(f"Table '{table}' has a new column '{column}'")
+                else:
+                    logging.info(f"Table '{table}' column '{column}' already exists.")
+        except OracleError as e:
+            logging.error(f"Error synchronizing table {table}: {e}")
+
+    def synchronize_view(self, view_name, alter_sync, source_code_hash, create_on_target):
+        try:
+            source_definition = self.get_view_definition(view_name)
+            self.cursor.execute(f"SELECT dbms_metadata.get_ddl('VIEW', '{view_name.upper()}') FROM dual")
+            original_state = self.cursor.fetchone()
+            original_state = original_state[0] if original_state else None
+
+            self.cursor.execute(f"SELECT view_name FROM user_views WHERE view_name = '{view_name.upper()}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists and create_on_target:
+                logging.info(f"View {view_name} doesn't exist on target. Creating...")
+                
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"View {view_name} created successfully on target.")
+                    self.log_sync_action("view", view_name, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                return
+
+            if source_definition != original_state:
+                logging.info(f"Synchronizing view: {view_name}")
+                self.cursor.execute(f"DROP VIEW {view_name}")
+                
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"View {view_name} synchronized successfully.")
+                    self.log_sync_action("view", view_name, "sync", source_code_hash, "source_to_target", original_state, new_state, "drop")
+            else:
+                logging.info(f"View {view_name} is already synchronized.")
+        except OracleError as e:
+            logging.error(f"Error synchronizing view {view_name}: {e}")
+
+    def synchronize_procedure(self, procedure_name, alter_sync, source_code_hash, create_on_target):
+        try:
+            source_definition = self.get_procedure_definition(procedure_name)
+
+            self.cursor.execute(f"SELECT object_name FROM user_procedures WHERE object_name = '{procedure_name.upper()}'")
+            target_exists = bool(self.cursor.fetchone())
+
+            if not target_exists or create_on_target:
+                if not target_exists:
+                    logging.info(f"Procedure {procedure_name} doesn't exist on target. Creating...")
+                else:
+                    logging.info(f"Procedure {procedure_name} creation is not disabled. Creating...")
+
+                if self.test_sql_statement(source_definition):
+                    self.cursor.execute(source_definition)
+                    new_state = source_definition
+                    logging.info(f"Procedure {procedure_name} created successfully on target.")
+                    self.log_sync_action("procedure", procedure_name, "create", source_code_hash, "source_to_target", None, new_state, "drop")
+                return
+
+            if target_exists:
+                target_definition = self.get_procedure_definition(procedure_name)
+                original_state = target_definition
+
+                if source_definition != target_definition:
+                    logging.info(f"Synchronizing procedure: {procedure_name}")
+                    self.cursor.execute(f"DROP PROCEDURE {procedure_name}")
+                    
+                    if self.test_sql_statement(source_definition):
+                        self.cursor.execute(source_definition)
+                        new_state = source_definition
+                        logging.info(f"Procedure {procedure_name} synchronized successfully.")
+                        self.log_sync_action("procedure", procedure_name, "sync", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                else:
+                    logging.info(f"Procedure {procedure_name} is already synchronized.")
+        except OracleError as e:
+            logging.error(f"Error synchronizing procedure {procedure_name}: {e}")
+
+    def synchronize_all_tables(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT table_name FROM user_tables")
+            tables_to_sync = [table[0] for table in self.cursor.fetchall()]
+
+            for table in tables_to_sync:
+                self.synchronize_table(table, alter_sync, source_code_hash, create_on_target)
+        except OracleError as e:
+            logging.error(f"Error synchronizing all tables: {e}")
+
+    def synchronize_all_views(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT view_name FROM user_views")
+            views_to_sync = [view[0] for view in self.cursor.fetchall()]
+
+            for view in views_to_sync:
+                self.synchronize_view(view, alter_sync, source_code_hash, create_on_target)
+        except OracleError as e:
+            logging.error(f"Error synchronizing all views: {e}")
+
+    def synchronize_all_procedures(self, alter_sync, source_code_hash, create_on_target):
+        try:
+            self.cursor.execute("SELECT object_name FROM user_procedures")
+            procedures_to_sync = [proc[0] for proc in self.cursor.fetchall()]
+
+            for procedure in procedures_to_sync:
+                self.synchronize_procedure(procedure, alter_sync, source_code_hash, create_on_target)
+        except OracleError as e:
+            logging.error(f"Error synchronizing all procedures: {e}")
+
+    def rollback_table(self, table_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='table' AND object_name=:1 ORDER BY timestamp DESC LIMIT 1", (table_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP TABLE {table_name}")
+                logging.info(f"Dropped table {table_name} as part of rollback.")
+            elif action == 'alter' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back table {table_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for table {table_name}.")
+        except OracleError as e:
+            logging.error(f"Error rolling back table {table_name}: {e}")
+
+    def rollback_view(self, view_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='view' AND object_name=:1 ORDER BY timestamp DESC LIMIT 1", (view_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP VIEW {view_name}")
+                logging.info(f"Dropped view {view_name} as part of rollback.")
+            elif action == 'sync' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back view {view_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for view {view_name}.")
+        except OracleError as e:
+            logging.error(f"Error rolling back view {view_name}: {e}")
+
+    def rollback_procedure(self, procedure_name):
+        try:
+            self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='procedure' AND object_name=:1 ORDER BY timestamp DESC LIMIT 1", (procedure_name,))
+            row = self.cursor.fetchone()
+            original_state, action = row if row else (None, None)
+            
+            if action == 'create':
+                self.cursor.execute(f"DROP PROCEDURE {procedure_name}")
+                logging.info(f"Dropped procedure {procedure_name} as part of rollback.")
+            elif action == 'sync' and original_state:
+                if self.test_sql_statement(original_state):
+                    self.cursor.execute(original_state)
+                    logging.info(f"Rolled back procedure {procedure_name} to its original state using: {original_state}")
+            else:
+                logging.warning(f"No rollback action found for procedure {procedure_name}.")
+        except OracleError as e:
+            logging.error(f"Error rolling back procedure {procedure_name}: {e}")
+
 class DatabaseSyncFactory:
     @staticmethod
     def get_sync_instance(db_type, config):
@@ -696,13 +1192,17 @@ class DatabaseSyncFactory:
             return MongoDBSync(config)
         elif db_type == 'neo4j':
             return Neo4jSync(config)
+        elif db_type == 'sqlserver':
+            return SQLServerSync(config)
+        elif db_type == 'oracle':
+            return OracleSync(config)
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
 
 def main():
     parser = argparse.ArgumentParser(description="Database Synchronization Tool")
     parser.add_argument("--source-config", help="Path to JSON file containing source database configuration")
-    parser.add_argument("--source-db-type", help="Type of the source database (e.g., mysql, postgresql, mongodb, neo4j)")
+    parser.add_argument("--source-db-type", help="Type of the source database (e.g., mysql, postgresql, mongodb, neo4j, sqlserver, oracle)")
     parser.add_argument("--target-configs", help="Path to JSON file containing target database configurations")
     parser.add_argument("--sync-all-tables", action="store_true", help="Sync all tables from source")
     parser.add_argument("--sync-all-views", action="store_true", help="Sync all views from source")
@@ -733,8 +1233,6 @@ def main():
                 target_sync.rollback_view(obj_name)
             elif obj_type == 'procedure':
                 target_sync.rollback_procedure(obj_name)
-
-
             else:
                 logging.error(f"Unsupported rollback object type: {obj_type}")
             target_sync.close()
