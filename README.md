@@ -2,7 +2,10 @@
 
 ## Overview
 
-Aquifer is a database synchronization tool designed to synchronize database objects (tables, views, procedures) between a source database and multiple target databases. It supports MySQL, PostgreSQL, MongoDB, and Neo4j databases. Aquifer also includes features for testing SQL statements for validity before execution and rolling back changes if necessary.
+Aquifer is a database synchronization tool designed to synchronize database objects (tables, views, procedures) between a source database and multiple target databases. It supports MySQL, PostgreSQL, MongoDB, and Neo4j databases. Aquifer also includes features for testing SQL statements for validity before execution and rolling back changes if necessary. 
+
+## With that said, 
+### USE AT YOUR OWN RISK. THIS IS MOSTLY UNTESTED AS OF 5/19/2024
 
 ## Features
 
