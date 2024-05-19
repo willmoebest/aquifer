@@ -1,3 +1,5 @@
+![image](https://github.com/willmoebest/aquifer/assets/113856531/ccb3d225-d0db-4ce7-a34e-ccd3d7aeb284)
+
 # Aquifer
 
 ## Overview
