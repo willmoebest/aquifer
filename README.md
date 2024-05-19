@@ -1,7 +1,4 @@
 # Aquifer
-Poor mans Database DevOps tool, inspired by Liquibase
-
-# Aquifer
 
 ## Overview
 
@@ -25,8 +22,7 @@ Aquifer is a database synchronization tool designed to synchronize database obje
 1. Clone the repository:
 
     ```sh
-    git clone <repository_url>
-    cd <repository_directory>
+    git clone https://github.com/willmoebest/aquifer.git
     ```
 
 2. Install required Python packages:
