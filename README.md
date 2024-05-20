@@ -5,7 +5,7 @@
 ## Overview
 
 Aquifer is a powerful and flexible database synchronization tool designed to synchronize database objects (tables, views, procedures) between a source database and multiple target databases. It supports a wide range of databases including MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle. Aquifer also includes features for testing SQL statements for validity before execution and rolling back changes if necessary.
-
+## In no way connected to Liquibase other than extreme affection!
 ## Features
 
 - Synchronize tables, views, and procedures between source and target databases.
