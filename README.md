@@ -1,18 +1,16 @@
 
 # Aquifer![Aquifer-GitHub](https://github.com/willmoebest/aquifer/assets/113856531/19557f45-b7ab-4b8a-8c27-4835fb776da3)
-
-
 ## Overview
 
-Aquifer is a powerful and flexible database synchronization tool designed to synchronize database objects (tables, views, procedures) between a source database and multiple target databases. It supports a wide range of databases including MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle. Aquifer also includes features for testing SQL statements for validity before execution and rolling back changes if necessary.
-Its the place change emanates from.
-## In no way connected to Liquibase other than admiration!
+Aquifer is a powerful and flexible database synchronization tool designed to synchronize database objects (tables, views, procedures) between a source database and multiple target databases. It supports a wide range of databases including MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle. Aquifer also includes features for testing SQL statements for validity before execution and rolling back changes if necessary. Its the place change emanates from.
+
 ## Features
 
 - Synchronize tables, views, and procedures between source and target databases.
 - Support for MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle.
 - Test SQL statements for validity before execution.
 - Log changes and provide rollback functionality.
+- Synchronize indexes for tables.
 - Command-line interface for easy usage.
 
 ## Requirements
@@ -46,6 +44,7 @@ Its the place change emanates from.
 - `--sync-all-procedures`: Sync all procedures from the source database to the target databases.
 - `--alter-sync`: Use `ALTER` statements to sync tables, views, and procedures.
 - `--create-on-target`: Create objects on target databases if they don't exist in the source database.
+- `--sync-indexes`: Sync indexes for tables.
 - `--rollback`: Rollback changes for a specific object (format: `type:name`).
 
 ### Example Configurations
@@ -125,6 +124,12 @@ python aquifer.py --source-config source_config.json --source-db-type mysql --ta
 python aquifer.py --source-config source_config.json --source-db-type mysql --target-configs target_configs.json --sync-all-procedures
 ```
 
+#### Synchronize Indexes
+
+```sh
+python aquifer.py --source-config source_config.json --source-db-type mysql --target-configs target_configs.json --sync-all-tables --sync-indexes
+```
+
 #### Rollback Changes for a Specific Table
 
 ```sh
@@ -150,7 +155,7 @@ This project is licensed under the GNU License. See the LICENSE file for details
     - Create JSON configuration files for the source and target databases. Refer to the example configurations above.
 
 2. **Running Synchronization**:
-    - Use the appropriate command-line arguments to synchronize tables, views, and procedures from the source database to the target databases.
+    - Use the appropriate command-line arguments to synchronize tables, views, procedures, and indexes from the source database to the target databases.
     - Example: To synchronize all tables, run:
         ```sh
         python aquifer.py --source-config source_config.json --source-db-type mysql --target-configs target_configs.json --sync-all-tables
