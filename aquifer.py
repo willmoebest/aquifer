@@ -1,6 +1,6 @@
 """
 Author: Will Moebest
-Date: 5/19/2024
+Date: 5/22/2024
 Description: Aquifer - A comprehensive database synchronization tool supporting MySQL, PostgreSQL, MongoDB, Neo4j, SQL Server, and Oracle.
              This script was developed with the assistance of GPT-4 by OpenAI.
 """
@@ -63,6 +63,10 @@ class DatabaseSync(ABC):
         pass
     
     @abstractmethod
+    def synchronize_indexes(self, table):
+        pass
+    
+    @abstractmethod
     def rollback_table(self, table_name):
         pass
     
@@ -110,53 +114,44 @@ class MySQLSync(DatabaseSync):
 
     def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
         try:
-            # Retrieve original state from target
+            # Retrieve original state from source
             self.cursor.execute(f"SHOW CREATE TABLE {table}")
             original_state = self.cursor.fetchone()
             original_state = original_state[1] if original_state else None
 
             # Synchronization logic
-            self.cursor.execute(f"DESCRIBE {table}")
-            source_schema = self.cursor.fetchall()
-            source_columns = [(col[0], col[1]) for col in source_schema]
-
             self.cursor.execute(f"SHOW TABLES LIKE '{table}'")
             target_exists = bool(self.cursor.fetchone())
 
             if not target_exists:
                 if create_on_target:
                     logging.info(f"Table {table} doesn't exist on target. Creating...")
-                    create_table_statement = f"CREATE TABLE {table} ("
-                    for column, column_type in source_columns:
-                        create_table_statement += f"{column} {column_type}, "
-                    create_table_statement = create_table_statement[:-2] + ");"
-                    
-                    if self.test_sql_statement(create_table_statement):
-                        self.cursor.execute(create_table_statement)
-                        new_state = create_table_statement
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
                         logging.info(f"Table {table} created successfully on target.")
-                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", None, new_state, "drop")
                 return
 
             # If the table exists on the target
-            self.cursor.execute(f"DESCRIBE {table}")
-            target_schema = self.cursor.fetchall()
-            target_columns = {col[0]: col[1] for col in target_schema}
+            self.cursor.execute(f"SHOW CREATE TABLE {table}")
+            target_state = self.cursor.fetchone()
+            target_state = target_state[1] if target_state else None
 
-            for column, column_type in source_columns:
-                if column not in target_columns:
-                    if alter_sync:
-                        statement = f"ALTER TABLE {table} ADD COLUMN {column} {column_type};"
-                        logging.info(f"Applying ALTER statement: {statement}")
-                        
-                        if self.test_sql_statement(statement):
-                            self.cursor.execute(statement)
-                            new_state = statement
-                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
-                    else:
-                        logging.info(f"Table '{table}' has a new column '{column}'")
+            if original_state != target_state:
+                logging.info(f"Synchronizing table: {table}")
+                if alter_sync:
+                    # Implement the logic for ALTER statements if required
+                    pass
                 else:
-                    logging.info(f"Table '{table}' column '{column}' already exists.")
+                    self.cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
+                        logging.info(f"Table {table} synchronized successfully.")
+                        self.log_sync_action("table", table, "sync", source_code_hash, "source_to_target", target_state, new_state, "drop")
+            else:
+                logging.info(f"Table {table} is already synchronized.")
         except MySQLError as e:
             logging.error(f"Error synchronizing table {table}: {e}")
 
@@ -262,6 +257,19 @@ class MySQLSync(DatabaseSync):
         except MySQLError as e:
             logging.error(f"Error synchronizing all procedures: {e}")
 
+    def synchronize_indexes(self, table):
+        try:
+            self.cursor.execute(f"SHOW INDEXES FROM {table}")
+            indexes = self.cursor.fetchall()
+            for index in indexes:
+                if index[2] != 'PRIMARY':
+                    create_index_statement = f"CREATE INDEX {index[2]} ON {table} ({index[4]})"
+                    logging.info(f"Creating index: {create_index_statement}")
+                    if self.test_sql_statement(create_index_statement):
+                        self.cursor.execute(create_index_statement)
+        except MySQLError as e:
+            logging.error(f"Error synchronizing indexes for table {table}: {e}")
+
     def rollback_table(self, table_name):
         try:
             self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='table' AND object_name=%s ORDER BY timestamp DESC LIMIT 1", (table_name,))
@@ -352,53 +360,44 @@ class PostgreSQLSync(DatabaseSync):
 
     def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
         try:
-            # Retrieve original state from target
+            # Retrieve original state from source
             self.cursor.execute(f"SELECT pg_get_tabledef('{table}')")
             original_state = self.cursor.fetchone()
             original_state = original_state[0] if original_state else None
 
             # Synchronization logic
-            self.cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table}'")
-            source_schema = self.cursor.fetchall()
-            source_columns = [(col[0], col[1]) for col in source_schema]
-
             self.cursor.execute(f"SELECT to_regclass('{table}')")
             target_exists = bool(self.cursor.fetchone())
 
             if not target_exists:
                 if create_on_target:
                     logging.info(f"Table {table} doesn't exist on target. Creating...")
-                    create_table_statement = f"CREATE TABLE {table} ("
-                    for column, column_type in source_columns:
-                        create_table_statement += f"{column} {column_type}, "
-                    create_table_statement = create_table_statement[:-2] + ");"
-                    
-                    if self.test_sql_statement(create_table_statement):
-                        self.cursor.execute(create_table_statement)
-                        new_state = create_table_statement
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
                         logging.info(f"Table {table} created successfully on target.")
-                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", None, new_state, "drop")
                 return
 
             # If the table exists on the target
-            self.cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table}'")
-            target_schema = self.cursor.fetchall()
-            target_columns = {col[0]: col[1] for col in target_schema}
+            self.cursor.execute(f"SELECT pg_get_tabledef('{table}')")
+            target_state = self.cursor.fetchone()
+            target_state = target_state[0] if target_state else None
 
-            for column, column_type in source_columns:
-                if column not in target_columns:
-                    if alter_sync:
-                        statement = f"ALTER TABLE {table} ADD COLUMN {column} {column_type};"
-                        logging.info(f"Applying ALTER statement: {statement}")
-                        
-                        if self.test_sql_statement(statement):
-                            self.cursor.execute(statement)
-                            new_state = statement
-                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
-                    else:
-                        logging.info(f"Table '{table}' has a new column '{column}'")
+            if original_state != target_state:
+                logging.info(f"Synchronizing table: {table}")
+                if alter_sync:
+                    # Implement the logic for ALTER statements if required
+                    pass
                 else:
-                    logging.info(f"Table '{table}' column '{column}' already exists.")
+                    self.cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
+                        logging.info(f"Table {table} synchronized successfully.")
+                        self.log_sync_action("table", table, "sync", source_code_hash, "source_to_target", target_state, new_state, "drop")
+            else:
+                logging.info(f"Table {table} is already synchronized.")
         except PGError as e:
             logging.error(f"Error synchronizing table {table}: {e}")
 
@@ -503,6 +502,22 @@ class PostgreSQLSync(DatabaseSync):
                 self.synchronize_procedure(procedure, alter_sync, source_code_hash, create_on_target)
         except PGError as e:
             logging.error(f"Error synchronizing all procedures: {e}")
+
+    def synchronize_indexes(self, table):
+        try:
+            self.cursor.execute(f"""
+                SELECT indexname, indexdef 
+                FROM pg_indexes 
+                WHERE tablename = '{table}'
+            """)
+            indexes = self.cursor.fetchall()
+            for index in indexes:
+                create_index_statement = index[1]
+                logging.info(f"Creating index: {create_index_statement}")
+                if self.test_sql_statement(create_index_statement):
+                    self.cursor.execute(create_index_statement)
+        except PGError as e:
+            logging.error(f"Error synchronizing indexes for table {table}: {e}")
 
     def rollback_table(self, table_name):
         try:
@@ -610,6 +625,10 @@ class MongoDBSync(DatabaseSync):
         # Implement MongoDB-specific logic for synchronizing all procedures (if applicable)
         pass
     
+    def synchronize_indexes(self, table):
+        # Implement MongoDB-specific logic for synchronizing indexes (if applicable)
+        pass
+    
     def rollback_table(self, table_name):
         # Implement MongoDB-specific logic for rolling back tables (collections)
         pass
@@ -677,6 +696,10 @@ class Neo4jSync(DatabaseSync):
         # Implement Neo4j-specific logic for synchronizing all procedures (if applicable)
         pass
     
+    def synchronize_indexes(self, table):
+        # Implement Neo4j-specific logic for synchronizing indexes (if applicable)
+        pass
+    
     def rollback_table(self, table_name):
         # Implement Neo4j-specific logic for rolling back nodes/relationships
         pass
@@ -732,53 +755,44 @@ class SQLServerSync(DatabaseSync):
 
     def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
         try:
-            # Retrieve original state from target
+            # Retrieve original state from source
             self.cursor.execute(f"SELECT OBJECT_DEFINITION (OBJECT_ID(N'{table}'))")
             original_state = self.cursor.fetchone()
             original_state = original_state[0] if original_state else None
 
             # Synchronization logic
-            self.cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'{table}'")
-            source_schema = self.cursor.fetchall()
-            source_columns = [(col[0], col[1]) for col in source_schema]
-
             self.cursor.execute(f"SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'{table}'")
             target_exists = bool(self.cursor.fetchone())
 
             if not target_exists:
                 if create_on_target:
                     logging.info(f"Table {table} doesn't exist on target. Creating...")
-                    create_table_statement = f"CREATE TABLE {table} ("
-                    for column, column_type in source_columns:
-                        create_table_statement += f"{column} {column_type}, "
-                    create_table_statement = create_table_statement[:-2] + ");"
-                    
-                    if self.test_sql_statement(create_table_statement):
-                        self.cursor.execute(create_table_statement)
-                        new_state = create_table_statement
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
                         logging.info(f"Table {table} created successfully on target.")
-                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", None, new_state, "drop")
                 return
 
             # If the table exists on the target
-            self.cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'{table}'")
-            target_schema = self.cursor.fetchall()
-            target_columns = {col[0]: col[1] for col in target_schema}
+            self.cursor.execute(f"SELECT OBJECT_DEFINITION (OBJECT_ID(N'{table}'))")
+            target_state = self.cursor.fetchone()
+            target_state = target_state[0] if target_state else None
 
-            for column, column_type in source_columns:
-                if column not in target_columns:
-                    if alter_sync:
-                        statement = f"ALTER TABLE {table} ADD {column} {column_type};"
-                        logging.info(f"Applying ALTER statement: {statement}")
-                        
-                        if self.test_sql_statement(statement):
-                            self.cursor.execute(statement)
-                            new_state = statement
-                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
-                    else:
-                        logging.info(f"Table '{table}' has a new column '{column}'")
+            if original_state != target_state:
+                logging.info(f"Synchronizing table: {table}")
+                if alter_sync:
+                    # Implement the logic for ALTER statements if required
+                    pass
                 else:
-                    logging.info(f"Table '{table}' column '{column}' already exists.")
+                    self.cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
+                        logging.info(f"Table {table} synchronized successfully.")
+                        self.log_sync_action("table", table, "sync", source_code_hash, "source_to_target", target_state, new_state, "drop")
+            else:
+                logging.info(f"Table {table} is already synchronized.")
         except ODBCError as e:
             logging.error(f"Error synchronizing table {table}: {e}")
 
@@ -884,6 +898,23 @@ class SQLServerSync(DatabaseSync):
         except ODBCError as e:
             logging.error(f"Error synchronizing all procedures: {e}")
 
+    def synchronize_indexes(self, table):
+        try:
+            self.cursor.execute(f"""
+                SELECT i.name, COL_NAME(ic.object_id, ic.column_id) AS column_name
+                FROM sys.indexes AS i
+                INNER JOIN sys.index_columns AS ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                WHERE i.is_primary_key = 0 AND OBJECT_NAME(ic.object_id) = '{table}'
+            """)
+            indexes = self.cursor.fetchall()
+            for index in indexes:
+                create_index_statement = f"CREATE INDEX {index[0]} ON {table} ({index[1]})"
+                logging.info(f"Creating index: {create_index_statement}")
+                if self.test_sql_statement(create_index_statement):
+                    self.cursor.execute(create_index_statement)
+        except ODBCError as e:
+            logging.error(f"Error synchronizing indexes for table {table}: {e}")
+
     def rollback_table(self, table_name):
         try:
             self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='table' AND object_name=? ORDER BY timestamp DESC LIMIT 1", (table_name,))
@@ -975,53 +1006,44 @@ class OracleSync(DatabaseSync):
 
     def synchronize_table(self, table, alter_sync, source_code_hash, create_on_target):
         try:
-            # Retrieve original state from target
+            # Retrieve original state from source
             self.cursor.execute(f"SELECT dbms_metadata.get_ddl('TABLE', '{table.upper()}') FROM dual")
             original_state = self.cursor.fetchone()
             original_state = original_state[0] if original_state else None
 
             # Synchronization logic
-            self.cursor.execute(f"SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '{table.upper()}'")
-            source_schema = self.cursor.fetchall()
-            source_columns = [(col[0], col[1]) for col in source_schema]
-
             self.cursor.execute(f"SELECT table_name FROM user_tables WHERE table_name = '{table.upper()}'")
             target_exists = bool(self.cursor.fetchone())
 
             if not target_exists:
                 if create_on_target:
                     logging.info(f"Table {table} doesn't exist on target. Creating...")
-                    create_table_statement = f"CREATE TABLE {table} ("
-                    for column, column_type in source_columns:
-                        create_table_statement += f"{column} {column_type}, "
-                    create_table_statement = create_table_statement[:-2] + ");"
-                    
-                    if self.test_sql_statement(create_table_statement):
-                        self.cursor.execute(create_table_statement)
-                        new_state = create_table_statement
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
                         logging.info(f"Table {table} created successfully on target.")
-                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", original_state, new_state, "drop")
+                        self.log_sync_action("table", table, "create", source_code_hash, "source_to_target", None, new_state, "drop")
                 return
 
             # If the table exists on the target
-            self.cursor.execute(f"SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '{table.upper()}'")
-            target_schema = self.cursor.fetchall()
-            target_columns = {col[0]: col[1] for col in target_schema}
+            self.cursor.execute(f"SELECT dbms_metadata.get_ddl('TABLE', '{table.upper()}') FROM dual")
+            target_state = self.cursor.fetchone()
+            target_state = target_state[0] if target_state else None
 
-            for column, column_type in source_columns:
-                if column not in target_columns:
-                    if alter_sync:
-                        statement = f"ALTER TABLE {table} ADD ({column} {column_type})"
-                        logging.info(f"Applying ALTER statement: {statement}")
-                        
-                        if self.test_sql_statement(statement):
-                            self.cursor.execute(statement)
-                            new_state = statement
-                            self.log_sync_action("table", table, "alter", source_code_hash, "source_to_target", original_state, new_state, f"ALTER TABLE {table} DROP COLUMN {column}")
-                    else:
-                        logging.info(f"Table '{table}' has a new column '{column}'")
+            if original_state != target_state:
+                logging.info(f"Synchronizing table: {table}")
+                if alter_sync:
+                    # Implement the logic for ALTER statements if required
+                    pass
                 else:
-                    logging.info(f"Table '{table}' column '{column}' already exists.")
+                    self.cursor.execute(f"DROP TABLE {table}")
+                    if self.test_sql_statement(original_state):
+                        self.cursor.execute(original_state)
+                        new_state = original_state
+                        logging.info(f"Table {table} synchronized successfully.")
+                        self.log_sync_action("table", table, "sync", source_code_hash, "source_to_target", target_state, new_state, "drop")
+            else:
+                logging.info(f"Table {table} is already synchronized.")
         except OracleError as e:
             logging.error(f"Error synchronizing table {table}: {e}")
 
@@ -1127,6 +1149,22 @@ class OracleSync(DatabaseSync):
         except OracleError as e:
             logging.error(f"Error synchronizing all procedures: {e}")
 
+    def synchronize_indexes(self, table):
+        try:
+            self.cursor.execute(f"""
+                SELECT index_name, column_name
+                FROM all_ind_columns
+                WHERE table_name = '{table.upper()}'
+            """)
+            indexes = self.cursor.fetchall()
+            for index in indexes:
+                create_index_statement = f"CREATE INDEX {index[0]} ON {table} ({index[1]})"
+                logging.info(f"Creating index: {create_index_statement}")
+                if self.test_sql_statement(create_index_statement):
+                    self.cursor.execute(create_index_statement)
+        except OracleError as e:
+            logging.error(f"Error synchronizing indexes for table {table}: {e}")
+
     def rollback_table(self, table_name):
         try:
             self.cursor.execute("SELECT original_state, action FROM sync_log WHERE object_type='table' AND object_name=:1 ORDER BY timestamp DESC LIMIT 1", (table_name,))
@@ -1209,6 +1247,7 @@ def main():
     parser.add_argument("--sync-all-procedures", action="store_true", help="Sync all procedures from source")
     parser.add_argument("--alter-sync", action="store_true", help="Use ALTER statements to sync tables, views, and procedures")
     parser.add_argument("--create-on-target", action="store_true", help="Create objects on target if they don't exist in source")
+    parser.add_argument("--sync-indexes", action="store_true", help="Sync indexes for tables")
     parser.add_argument("--rollback", help="Rollback changes for a specific object (format: type:name)")
     args = parser.parse_args()
 
@@ -1248,6 +1287,9 @@ def main():
 
             if args.sync_all_tables:
                 target_sync.synchronize_all_tables(args.alter_sync, source_code_hash, args.create_on_target)
+                if args.sync_indexes:
+                    for table in target_sync.get_tables():
+                        target_sync.synchronize_indexes(table)
 
             if args.sync_all_views:
                 target_sync.synchronize_all_views(args.alter_sync, source_code_hash, args.create_on_target)
